@@ -109,7 +109,7 @@ def patch_top5_lines(xml: str) -> str:
     return head + tail
 
 # ---- UI Streamlit ----
-st.set_page_config(page_title="SPL Batch – Web", page_icon="🧩", layout="wide")
+st.set_page_config(page_title="UGC - KID PACK", page_icon="🧩", layout="wide")
 st.title("SPL Batch – Web")
 
 col1, col2 = st.columns([2,1])
