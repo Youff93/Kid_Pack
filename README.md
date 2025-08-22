@@ -1,5 +1,5 @@
 
-# SPL Batch – Web (Streamlit)
+# UGC – KID PACKS (Streamlit)
 
 ## Installation
 ```bash
