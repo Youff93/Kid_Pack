@@ -2,6 +2,7 @@
 import io, re, json, zipfile, csv
 from xml.etree import ElementTree as ET
 import streamlit as st
+import pandas as pd
 
 # ---- Helpers ----
 DECL_RE = re.compile(r'^\s*(<\?xml[^>]*\?>)\s*', re.I)
@@ -17,7 +18,7 @@ def list_events(tree: ET.ElementTree):
     root = tree.getroot()
     for ev in root.iter("Event"):
         comp = None
-        for c in ev.iter("Composition"):
+        for c in root.iter("Composition"):
             comp = c; break
         if comp is None:
             continue
@@ -65,25 +66,6 @@ def compact_xml(xml: str) -> str:
     import re as _re
     return _re.sub(r">\s+<", "><", xml.strip())
 
-def pretty_xml(xml: str) -> str:
-    import re as _re
-    m = _re.match(r'^\s*(<\?xml[^>]*\?>)\s*', xml)
-    decl = m.group(1) if m else '<?xml version="1.0" encoding="UTF-8"?>'
-    body = xml[m.end():] if m else xml
-    body = _re.sub(r'>\s+<', '><', body.strip())
-    pad = 0; IND = '  '; out_lines = [decl]
-    for token in _re.split(r'>\s*<', body):
-        token = token.strip()
-        if not token: continue
-        if token.startswith('/'):
-            pad = max(pad - 1, 0)
-        line = (IND * pad) + '<' + token + '>'
-        if (not token.startswith('/') and not token.endswith('/') 
-            and not _re.search(r'<\w[^>]*>.*</\w', '<'+token+'>')):
-            pad += 1
-        out_lines.append(line)
-    return '\n'.join(out_lines)
-
 SHOWTITLE_RE = re.compile(r'(<ShowTitleText[^>]*>)([^<]*)(</ShowTitleText>)', re.I)
 ANNOT_RE     = re.compile(r'(<AnnotationText[^>]*>)([^<]*)(</AnnotationText>)', re.I)
 ID_ELEM_RE   = re.compile(r'(<Id[^>]*>)([^<]*)(</Id>)', re.I)
@@ -113,25 +95,22 @@ def patch_top5_lines(xml: str) -> str:
         head, _ = ID_ATTR_RE.subn(id_attr_repl, head, count=1)
     return head + tail
 
-# ---- UI Streamlit ----
+# ---- App ----
 st.set_page_config(page_title="UGC - KID PACK", page_icon="🧩", layout="wide")
 st.title("UGC - KID PACK")
 
-# --- Safe session_state init ---
-if "bl_text" not in st.session_state:
-    st.session_state.bl_text = ""
-if "selected_from_agg" not in st.session_state:
-    st.session_state.selected_from_agg = []
-if "bl_text_final" not in st.session_state:
-    st.session_state.bl_text_final = st.session_state.bl_text
+# Session-state init (single source of truth)
+st.session_state.setdefault("bl_text", "")
+st.session_state.setdefault("agg_df", None)
 
 col1, col2 = st.columns([2,1])
 
 with col1:
     uploads = st.file_uploader("Charge plusieurs XML", type=["xml"], accept_multiple_files=True)
-    keep_decl = st.checkbox("Conserver déclaration XML d’origine (forcé)", value=True, disabled=True)
-    compact   = st.checkbox("Sortie compacte (minifiée) (forcé)", value=True, disabled=True)
-    suffix    = st.text_input("Suffixe export (nom de fichier seulement)", value="_KIDSAFE")
+    # Forced options (ON and disabled)
+    st.checkbox("Conserver déclaration XML d’origine (forcé)", value=True, disabled=True)
+    st.checkbox("Sortie compacte (minifiée) (forcé)", value=True, disabled=True)
+    suffix = st.text_input("Suffixe export (nom de fichier seulement)", value="_KIDSAFE")
 
 with col2:
     st.markdown("### Blacklist")
@@ -140,31 +119,14 @@ with col2:
         try:
             txt = bl_file.read().decode("utf-8", errors="replace")
             lines = [l.strip() for l in txt.splitlines() if l.strip()]
-            st.session_state.bl_text = "\n".join(lines)
-            st.session_state.bl_text_final = st.session_state.bl_text
+            st.session_state["bl_text"] = "\n".join(lines)
             st.success(f"Blacklist importée : {len(lines)} ligne(s).")
         except Exception as e:
             st.error(f"Erreur import blacklist : {e}")
+    # Single editor (only here)
+    st.text_area("Contenu de la blacklist (1 par ligne)", value=st.session_state.get("bl_text",""), height=200, key="bl_text")
 
-    bl_text_area = st.text_area("Colle/édite ta blacklist (1 par ligne)", value=st.session_state.bl_text, height=200, key="bl_text_area")
-    st.session_state.bl_text = bl_text_area
-    st.session_state.bl_text_final = st.session_state.bl_text
-
-    st.caption("Astuce : tu peux coller un JSON (liste) — il sera normalisé.")
-    if st.button("Normaliser la blacklist"):
-        try:
-            parsed = json.loads(st.session_state.bl_text)
-            st.session_state.bl_text = "\n".join(sorted({normalize(x) for x in parsed if normalize(x)}))
-            st.session_state.bl_text_final = st.session_state.bl_text
-            st.experimental_rerun()
-        except Exception:
-            lines = [normalize(x) for x in st.session_state.bl_text.splitlines() if normalize(x)]
-            st.session_state.bl_text = "\n".join(sorted(set(lines)))
-            st.session_state.bl_text_final = st.session_state.bl_text
-            st.info("Normalisation effectuée sur les lignes (pas JSON).")
-            st.experimental_rerun()
-
-# Agrégation des annotations
+# Build aggregation & selection table
 agg = {}
 files_parsed = []
 if uploads:
@@ -179,47 +141,49 @@ if uploads:
                 key = normalize(ann)
                 if not key: continue
                 if key not in agg:
-                    agg[key] = {"ann": ann, "count": 0, "dur": dur, "rate": rate}
-                agg[key]["count"] += 1
+                    agg[key] = {"Annotation": ann, "Occurrences": 0, "EditRate": rate or "—", "Durée": dur or "—"}
+                agg[key]["Occurrences"] += 1
         except Exception as e:
             st.error(f"Erreur XML ({uf.name}) : {e}")
 
-# Zone de sélection depuis l'agrégat
 if agg:
-    st.subheader("Aperçu des annotations agrégées")
-    options_raw = sorted(agg.values(), key=lambda x: (-x["count"], x["ann"]))
-    options = [f"{v['ann']}  ({v['count']})" for v in options_raw]
-    label_to_ann = {f"{v['ann']}  ({v['count']})": v['ann'] for v in options_raw}
-    selected = st.multiselect("Sélectionne des médias à ajouter à la blacklist :", options, default=st.session_state.selected_from_agg)
-    st.session_state.selected_from_agg = selected
+    st.subheader("Aperçu des annotations (sélection multiple par cases à cocher)")
+    # Build dataframe with a checkbox column
+    rows = []
+    for v in sorted(agg.values(), key=lambda x: (-x["Occurrences"], x["Annotation"])):
+        rows.append({"✔": False, **v})
+    df = pd.DataFrame(rows)
+    edited = st.data_editor(
+        df,
+        use_container_width=True,
+        key="agg_df",
+        hide_index=True,
+        column_config={
+            "✔": st.column_config.CheckboxColumn("✔", help="Cocher pour ajouter à la blacklist"),
+            "Annotation": st.column_config.TextColumn("Annotation"),
+            "Occurrences": st.column_config.NumberColumn("Occurrences"),
+            "EditRate": st.column_config.TextColumn("EditRate"),
+            "Durée": st.column_config.TextColumn("Durée"),
+        }
+    )
     if st.button("Ajouter la sélection à la blacklist"):
-        current = [l for l in st.session_state.bl_text.splitlines() if l.strip()]
-        to_add = [label_to_ann[x] for x in selected]
-        new_lines = current + to_add
+        to_add = [row["Annotation"] for _, row in edited.iterrows() if row.get("✔")]
+        current = [l for l in st.session_state.get("bl_text","").splitlines() if l.strip()]
+        # De-dup by normalized key, preserve order
         seen = set(); dedup = []
-        for item in new_lines:
+        for item in current + to_add:
             key = normalize(item)
             if key and key not in seen:
                 seen.add(key); dedup.append(item)
-        st.session_state.bl_text = "\n".join(dedup)
-        st.session_state.bl_text_final = st.session_state.bl_text
+        st.session_state["bl_text"] = "\n".join(dedup)
         st.success(f"{len(to_add)} élément(s) ajoutés à la blacklist.")
-        st.experimental_rerun()
-    st.dataframe(
-        data=sorted(
-            [{"Annotation": v["ann"], "Occurrences": v["count"], "EditRate": v["rate"] or "—", "Durée": v["dur"] or "—"}
-             for v in agg.values()],
-            key=lambda x: (-x["Occurrences"], x["Annotation"])
-        ),
-        use_container_width=True
-    )
 
 # Export
 if st.button("Appliquer blacklist & Exporter en ZIP", type="primary"):
     if not files_parsed:
         st.warning("Charge au moins un XML.")
     else:
-        bl_keys = {normalize(x) for x in st.session_state.bl_text.splitlines() if normalize(x)}
+        bl_keys = {normalize(x) for x in st.session_state.get("bl_text","").splitlines() if normalize(x)}
         mem_zip = io.BytesIO()
         exported, removed_total = 0, 0
         log_rows = []
@@ -233,13 +197,17 @@ if st.button("Appliquer blacklist & Exporter en ZIP", type="primary"):
                 xml_bytes = ET.tostring(tree.getroot(), encoding="utf-8", xml_declaration=False, short_empty_elements=False)
                 xml = xml_bytes.decode("utf-8")
 
+                # keep declaration ALWAYS
                 if rec["decl"]:
                     xml = rec["decl"] + "\n" + xml.lstrip()
                 else:
                     import re as _re
                     xml = _re.sub(r"^\s*<\?xml[^>]*>\s*", "", xml).lstrip()
 
+                # compact ALWAYS
                 xml = compact_xml(xml)
+
+                # patch KID
                 xml = patch_top5_lines(xml)
 
                 base = rec["name"].rsplit(".", 1)[0]
@@ -256,16 +224,10 @@ if st.button("Appliquer blacklist & Exporter en ZIP", type="primary"):
 
         st.subheader("Logs des éléments retirés")
         if log_rows:
-            import pandas as pd
-            df = pd.DataFrame(log_rows)
-            st.dataframe(df, use_container_width=True)
+            df_log = pd.DataFrame(log_rows)
+            st.dataframe(df_log, use_container_width=True)
             csv_buf = io.StringIO()
-            df.to_csv(csv_buf, index=False)
+            df_log.to_csv(csv_buf, index=False)
             st.download_button("Télécharger les logs (CSV)", csv_buf.getvalue().encode("utf-8"), file_name="logs_retraits.csv", mime="text/csv")
         else:
             st.info("Aucun élément retiré.")
-
-# Zone d'édition finale de la blacklist
-st.markdown("### Blacklist courante")
-st.text_area("Contenu de la blacklist (1 par ligne)", value=st.session_state.bl_text, height=150, key="bl_text_final")
-st.session_state.bl_text = st.session_state.get("bl_text_final", st.session_state.bl_text)
