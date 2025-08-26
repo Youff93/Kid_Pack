@@ -17,9 +17,7 @@ def parse_xml_text(text: str) -> ET.ElementTree:
 def list_events(tree: ET.ElementTree):
     root = tree.getroot()
     for ev in root.iter("Event"):
-        comp = None
-        for c in root.iter("Composition"):
-            comp = c; break
+        comp = ev.find(".//Composition")  # FIX: scoped to this event
         if comp is None:
             continue
         ann_el = comp.find("AnnotationText")
@@ -99,10 +97,10 @@ def patch_top5_lines(xml: str) -> str:
 st.set_page_config(page_title="UGC - KID PACK", page_icon="🧩", layout="wide")
 st.title("UGC - KID PACK")
 
-# Single source of truth
-st.session_state.setdefault("bl_text", "")
+# Single source of truth separate from widget key
+st.session_state.setdefault("bl_store", "")
 
-col1, col2 = st.columns([2,1])
+col1, col2 = st.columns([2,1], gap="large")
 
 with col1:
     uploads = st.file_uploader("Charge plusieurs XML", type=["xml"], accept_multiple_files=True)
@@ -117,13 +115,17 @@ with col2:
         try:
             txt = bl_file.read().decode("utf-8", errors="replace")
             lines = [l.strip() for l in txt.splitlines() if l.strip()]
-            st.session_state["bl_text"] = "\n".join(lines)
+            st.session_state["bl_store"] = "\n".join(lines)
             st.success(f"Blacklist importée : {len(lines)} ligne(s).")
+            st.rerun()
         except Exception as e:
             st.error(f"Erreur import blacklist : {e}")
-    st.text_area("Contenu de la blacklist (1 par ligne)", value=st.session_state.get("bl_text",""), height=200, key="bl_text")
+    # Single editor bound to bl_store through a different widget key
+    current_val = st.text_area("Contenu de la blacklist (1 par ligne)", value=st.session_state.get("bl_store",""), height=200, key="bl_text_widget")
+    if current_val != st.session_state.get("bl_store",""):
+        st.session_state["bl_store"] = current_val
 
-# Build aggregation
+# Build aggregation properly
 agg = {}
 files_parsed = []
 if uploads:
@@ -136,7 +138,8 @@ if uploads:
             files_parsed.append({"name": uf.name, "text": raw, "decl": decl_str, "tree": tree})
             for _, ann, dur, rate in list_events(tree):
                 key = normalize(ann)
-                if not key: continue
+                if not key: 
+                    continue
                 if key not in agg:
                     agg[key] = {"Annotation": ann, "Occurrences": 0, "EditRate": rate or "—", "Durée": dur or "—"}
                 agg[key]["Occurrences"] += 1
@@ -148,10 +151,8 @@ if agg:
     rows = [{"✔": False, **v} for v in sorted(agg.values(), key=lambda x: (-x["Occurrences"], x["Annotation"]))]
     df = pd.DataFrame(rows)
 
-    use_table_selector = True
     selected_ann = []
-
-    # Robust selector with graceful fallback
+    use_table = True
     try:
         edited = st.data_editor(
             df,
@@ -159,38 +160,38 @@ if agg:
             hide_index=True,
             key="agg_editor",
             column_config={
-                "✔": st.column_config.CheckboxColumn("✔", help="Cocher pour ajouter à la blacklist"),
+                "✔": st.column_config.CheckboxColumn("✔", help="Cocher pour envoyer en blacklist"),
                 "Annotation": st.column_config.TextColumn("Annotation"),
                 "Occurrences": st.column_config.NumberColumn("Occurrences"),
                 "EditRate": st.column_config.TextColumn("EditRate"),
                 "Durée": st.column_config.TextColumn("Durée"),
             }
         )
-        selected_ann = [row["Annotation"] for _, row in edited.iterrows() if row.get("✔")]
-    except Exception as e:
-        use_table_selector = False
-        st.warning("Tableau éditable indisponible dans cet environnement. Passage en mode compatibilité (cases à cocher).")
-        selected_ann = []
+        selected_ann = [row["Annotation"] for _, row in edited.iterrows() if bool(row.get("✔"))]
+    except Exception:
+        use_table = False
+        st.warning("Sélecteur tableau indisponible ici. Mode compatibilité activé.")
         for i, row in df.iterrows():
             if st.checkbox(f"{row['Annotation']}  ({row['Occurrences']})", key=f"ck_{i}"):
                 selected_ann.append(row["Annotation"])
 
     if st.button("Ajouter la sélection à la blacklist"):
-        current = [l for l in st.session_state.get("bl_text","").splitlines() if l.strip()]
+        current = [l for l in st.session_state.get("bl_store","").splitlines() if l.strip()]
         seen = set(); dedup = []
         for item in current + selected_ann:
-            key = normalize(item)
-            if key and key not in seen:
-                seen.add(key); dedup.append(item)
-        st.session_state["bl_text"] = "\n".join(dedup)
+            k = normalize(item)
+            if k and k not in seen:
+                seen.add(k); dedup.append(item)
+        st.session_state["bl_store"] = "\n".join(dedup)
         st.success(f"{len(selected_ann)} élément(s) ajoutés à la blacklist.")
+        st.rerun()
 
 # Export
 if st.button("Appliquer blacklist & Exporter en ZIP", type="primary"):
     if not files_parsed:
         st.warning("Charge au moins un XML.")
     else:
-        bl_keys = {normalize(x) for x in st.session_state.get("bl_text","").splitlines() if normalize(x)}
+        bl_keys = {normalize(x) for x in st.session_state.get("bl_store","").splitlines() if normalize(x)}
         mem_zip = io.BytesIO()
         exported, removed_total = 0, 0
         log_rows = []
