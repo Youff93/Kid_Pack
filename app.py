@@ -99,15 +99,13 @@ def patch_top5_lines(xml: str) -> str:
 st.set_page_config(page_title="UGC - KID PACK", page_icon="🧩", layout="wide")
 st.title("UGC - KID PACK")
 
-# Session-state init (single source of truth)
+# Single source of truth
 st.session_state.setdefault("bl_text", "")
-st.session_state.setdefault("agg_df", None)
 
 col1, col2 = st.columns([2,1])
 
 with col1:
     uploads = st.file_uploader("Charge plusieurs XML", type=["xml"], accept_multiple_files=True)
-    # Forced options (ON and disabled)
     st.checkbox("Conserver déclaration XML d’origine (forcé)", value=True, disabled=True)
     st.checkbox("Sortie compacte (minifiée) (forcé)", value=True, disabled=True)
     suffix = st.text_input("Suffixe export (nom de fichier seulement)", value="_KIDSAFE")
@@ -123,10 +121,9 @@ with col2:
             st.success(f"Blacklist importée : {len(lines)} ligne(s).")
         except Exception as e:
             st.error(f"Erreur import blacklist : {e}")
-    # Single editor (only here)
     st.text_area("Contenu de la blacklist (1 par ligne)", value=st.session_state.get("bl_text",""), height=200, key="bl_text")
 
-# Build aggregation & selection table
+# Build aggregation
 agg = {}
 files_parsed = []
 if uploads:
@@ -147,36 +144,46 @@ if uploads:
             st.error(f"Erreur XML ({uf.name}) : {e}")
 
 if agg:
-    st.subheader("Aperçu des annotations (sélection multiple par cases à cocher)")
-    # Build dataframe with a checkbox column
-    rows = []
-    for v in sorted(agg.values(), key=lambda x: (-x["Occurrences"], x["Annotation"])):
-        rows.append({"✔": False, **v})
+    st.subheader("Aperçu des annotations — sélection multiple")
+    rows = [{"✔": False, **v} for v in sorted(agg.values(), key=lambda x: (-x["Occurrences"], x["Annotation"]))]
     df = pd.DataFrame(rows)
-    edited = st.data_editor(
-        df,
-        use_container_width=True,
-        key="agg_df",
-        hide_index=True,
-        column_config={
-            "✔": st.column_config.CheckboxColumn("✔", help="Cocher pour ajouter à la blacklist"),
-            "Annotation": st.column_config.TextColumn("Annotation"),
-            "Occurrences": st.column_config.NumberColumn("Occurrences"),
-            "EditRate": st.column_config.TextColumn("EditRate"),
-            "Durée": st.column_config.TextColumn("Durée"),
-        }
-    )
+
+    use_table_selector = True
+    selected_ann = []
+
+    # Robust selector with graceful fallback
+    try:
+        edited = st.data_editor(
+            df,
+            use_container_width=True,
+            hide_index=True,
+            key="agg_editor",
+            column_config={
+                "✔": st.column_config.CheckboxColumn("✔", help="Cocher pour ajouter à la blacklist"),
+                "Annotation": st.column_config.TextColumn("Annotation"),
+                "Occurrences": st.column_config.NumberColumn("Occurrences"),
+                "EditRate": st.column_config.TextColumn("EditRate"),
+                "Durée": st.column_config.TextColumn("Durée"),
+            }
+        )
+        selected_ann = [row["Annotation"] for _, row in edited.iterrows() if row.get("✔")]
+    except Exception as e:
+        use_table_selector = False
+        st.warning("Tableau éditable indisponible dans cet environnement. Passage en mode compatibilité (cases à cocher).")
+        selected_ann = []
+        for i, row in df.iterrows():
+            if st.checkbox(f"{row['Annotation']}  ({row['Occurrences']})", key=f"ck_{i}"):
+                selected_ann.append(row["Annotation"])
+
     if st.button("Ajouter la sélection à la blacklist"):
-        to_add = [row["Annotation"] for _, row in edited.iterrows() if row.get("✔")]
         current = [l for l in st.session_state.get("bl_text","").splitlines() if l.strip()]
-        # De-dup by normalized key, preserve order
         seen = set(); dedup = []
-        for item in current + to_add:
+        for item in current + selected_ann:
             key = normalize(item)
             if key and key not in seen:
                 seen.add(key); dedup.append(item)
         st.session_state["bl_text"] = "\n".join(dedup)
-        st.success(f"{len(to_add)} élément(s) ajoutés à la blacklist.")
+        st.success(f"{len(selected_ann)} élément(s) ajoutés à la blacklist.")
 
 # Export
 if st.button("Appliquer blacklist & Exporter en ZIP", type="primary"):
@@ -197,17 +204,13 @@ if st.button("Appliquer blacklist & Exporter en ZIP", type="primary"):
                 xml_bytes = ET.tostring(tree.getroot(), encoding="utf-8", xml_declaration=False, short_empty_elements=False)
                 xml = xml_bytes.decode("utf-8")
 
-                # keep declaration ALWAYS
                 if rec["decl"]:
                     xml = rec["decl"] + "\n" + xml.lstrip()
                 else:
                     import re as _re
                     xml = _re.sub(r"^\s*<\?xml[^>]*>\s*", "", xml).lstrip()
 
-                # compact ALWAYS
                 xml = compact_xml(xml)
-
-                # patch KID
                 xml = patch_top5_lines(xml)
 
                 base = rec["name"].rsplit(".", 1)[0]
