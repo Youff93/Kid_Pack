@@ -16,7 +16,7 @@ def parse_xml_text(text: str) -> ET.ElementTree:
 def list_events(tree: ET.ElementTree):
     root = tree.getroot()
     for ev in root.iter("Event"):
-        comp = ev.find(".//Composition")  # scoper à cet Event
+        comp = ev.find(".//Composition")  # scoped à l'Event
         if comp is None:
             continue
         ann_el = comp.find("AnnotationText")
@@ -38,7 +38,6 @@ def remove_blacklisted_events_with_log(tree: ET.ElementTree, blacklist_norm_keys
         key = normalize(ann)
         return key in blacklist_norm_keys, ann
 
-    # Cas courant : EventList
     for evlist in root.iter("EventList"):
         to_remove = []
         for ev in list(evlist.findall("Event")):
@@ -50,7 +49,6 @@ def remove_blacklisted_events_with_log(tree: ET.ElementTree, blacklist_norm_keys
             removed += 1
             logs.append({"Annotation": ann or "", "Reason": "blacklisted"})
 
-    # Fallback si structure atypique
     if removed == 0:
         for parent in root.iter():
             evs = list(parent.findall("Event"))
@@ -103,12 +101,18 @@ def patch_top5_lines(xml: str) -> str:
 st.set_page_config(page_title="UGC - KID PACK", page_icon="🧩", layout="wide")
 st.title("UGC - KID PACK")
 
-# Etat : source de vérité et widget séparés
+# Etat et PRE-SYNC AVANT TOUT WIDGET
 st.session_state.setdefault("bl_store", "")
-st.session_state.setdefault("bl_text_widget", "")
+st.session_state.setdefault("bl_text_widget", st.session_state["bl_store"])
+st.session_state.setdefault("pending_bl_widget_value", None)
 st.session_state.setdefault("last_msg", "")
 
-# Callback: widget -> store (quand l'utilisateur édite la zone de texte)
+# Si une mise à jour programmée du widget est en attente, l'appliquer AVANT de créer la zone de texte
+if st.session_state.get("pending_bl_widget_value") is not None:
+    st.session_state["bl_text_widget"] = st.session_state["pending_bl_widget_value"]
+    st.session_state["pending_bl_widget_value"] = None
+
+# Callback: quand l'utilisateur édite la zone de texte, on pousse dans bl_store
 def _on_bl_text_change():
     st.session_state["bl_store"] = st.session_state.get("bl_text_widget", "")
 
@@ -123,31 +127,30 @@ with col1:
 with col2:
     st.markdown("### Blacklist")
 
-    # Import .txt -> met à jour la source de vérité PUIS pousse dans le widget
+    # Import .txt -> met à jour la source + programme la mise à jour du widget pour le prochain run
     bl_file = st.file_uploader("Importer une blacklist (.txt)", type=["txt"], accept_multiple_files=False, key="bl_file")
     if bl_file is not None:
         try:
             txt = bl_file.read().decode("utf-8", errors="replace")
             lines = [l.strip() for l in txt.splitlines() if l.strip()]
             new_store = "\n".join(lines)
-            # MAJ cohérente : on met à jour store + widget, sans réécrire une clé de widget déjà rendue
             st.session_state["bl_store"] = new_store
-            st.session_state["bl_text_widget"] = new_store
+            st.session_state["pending_bl_widget_value"] = new_store  # sera appliqué avant création du widget
             st.session_state["last_msg"] = f"Blacklist importée : {len(lines)} ligne(s)."
             st.rerun()
         except Exception as e:
             st.error(f"Erreur import blacklist : {e}")
 
-    # Widget lié à bl_text_widget (et pas à bl_store)
+    # Zone de texte liée au widget (pas à la source)
     st.text_area(
         "Contenu de la blacklist (1 par ligne)",
-        value=st.session_state.get("bl_text_widget", st.session_state.get("bl_store", "")),
+        value=st.session_state.get("bl_text_widget", ""),
         height=220,
         key="bl_text_widget",
         on_change=_on_bl_text_change
     )
 
-# Agrégation
+# Agrégation des annotations
 agg = {}
 files_parsed = []
 if uploads:
@@ -189,7 +192,6 @@ if agg:
         }
     )
 
-    # Bouton d'ajout : on met à jour bl_store ET on pousse dans le widget, sans toucher à la clé du widget déjà rendue
     if st.button("Ajouter la sélection à la blacklist", key="btn_add_to_bl"):
         edited_df = edited if isinstance(edited, pd.DataFrame) else pd.DataFrame(edited)
         if edited_df is None or "select" not in edited_df.columns or "Annotation" not in edited_df.columns:
@@ -206,9 +208,9 @@ if agg:
                     if k and k not in seen:
                         seen.add(k); dedup.append(item)
                 new_store = "\n".join(dedup)
-                # MAJ cohérente store + widget
+                # MAJ source + programmer MAJ du widget AVANT prochain rendu
                 st.session_state["bl_store"] = new_store
-                st.session_state["bl_text_widget"] = new_store
+                st.session_state["pending_bl_widget_value"] = new_store
                 st.success(f"{len(selected)} élément(s) ajoutés à la blacklist.")
                 st.rerun()
 
