@@ -38,6 +38,7 @@ def remove_blacklisted_events_with_log(tree: ET.ElementTree, blacklist_norm_keys
         key = normalize(ann)
         return key in blacklist_norm_keys, ann
 
+    # Cas courant : EventList
     for evlist in root.iter("EventList"):
         to_remove = []
         for ev in list(evlist.findall("Event")):
@@ -49,6 +50,7 @@ def remove_blacklisted_events_with_log(tree: ET.ElementTree, blacklist_norm_keys
             removed += 1
             logs.append({"Annotation": ann or "", "Reason": "blacklisted"})
 
+    # Fallback
     if removed == 0:
         for parent in root.iter():
             evs = list(parent.findall("Event"))
@@ -101,7 +103,7 @@ def patch_top5_lines(xml: str) -> str:
 st.set_page_config(page_title="UGC - KID PACK", page_icon="🧩", layout="wide")
 st.title("UGC - KID PACK")
 
-# Source de vérité unique
+# Etat unique
 st.session_state.setdefault("bl_store", "")
 st.session_state.setdefault("last_msg", "")
 
@@ -126,11 +128,7 @@ with col2:
         except Exception as e:
             st.error(f"Erreur import blacklist : {e}")
 
-    st.text_area(
-        "Contenu de la blacklist (1 par ligne)",
-        height=220,
-        key="bl_store"
-    )
+    st.text_area("Contenu de la blacklist (1 par ligne)", height=220, key="bl_store")
 
 # Agrégation
 agg = {}
@@ -157,7 +155,7 @@ if uploads:
 if agg:
     st.subheader("Aperçu des annotations — sélection multiple")
 
-    # Tableau éditable avec colonne 'select' (ASCII)
+    # Tableau éditable (ASCII 'select')
     rows = [{"select": False, **v} for v in sorted(agg.values(), key=lambda x: (-x["Occurrences"], x["Annotation"]))]
     df = pd.DataFrame(rows)
 
@@ -176,12 +174,18 @@ if agg:
     )
 
     if st.button("Ajouter la sélection à la blacklist", key="btn_add_to_bl"):
-        # Récupérer l'état édité depuis session_state pour être sûr
-        edited_df = st.session_state.get("agg_editor")
-        if edited_df is None or "select" not in edited_df.columns:
+        # -> IMPORTANT: on utilise la valeur RETOURNÉE par data_editor
+        edited_df = edited
+        if not isinstance(edited_df, pd.DataFrame):
+            try:
+                edited_df = pd.DataFrame(edited_df)
+            except Exception:
+                edited_df = None
+
+        if edited_df is None or "select" not in edited_df.columns or "Annotation" not in edited_df.columns:
             st.warning("Aucune sélection trouvée.")
         else:
-            selected = edited_df.loc[edited_df["select"] == True, "Annotation"].dropna().tolist()
+            selected = edited_df.loc[edited_df["select"] == True, "Annotation"].dropna().astype(str).tolist()
             if not selected:
                 st.info("Rien à ajouter : aucune case cochée.")
             else:
