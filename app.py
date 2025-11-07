@@ -16,7 +16,7 @@ def parse_xml_text(text: str) -> ET.ElementTree:
 def list_events(tree: ET.ElementTree):
     root = tree.getroot()
     for ev in root.iter("Event"):
-        comp = ev.find(".//Composition")  # scoper à l'Event
+        comp = ev.find(".//Composition")  # scoper à cet Event
         if comp is None:
             continue
         ann_el = comp.find("AnnotationText")
@@ -50,7 +50,7 @@ def remove_blacklisted_events_with_log(tree: ET.ElementTree, blacklist_norm_keys
             removed += 1
             logs.append({"Annotation": ann or "", "Reason": "blacklisted"})
 
-    # Fallback
+    # Fallback si structure atypique
     if removed == 0:
         for parent in root.iter():
             evs = list(parent.findall("Event"))
@@ -103,9 +103,14 @@ def patch_top5_lines(xml: str) -> str:
 st.set_page_config(page_title="UGC - KID PACK", page_icon="🧩", layout="wide")
 st.title("UGC - KID PACK")
 
-# Etat unique
+# Etat : source de vérité et widget séparés
 st.session_state.setdefault("bl_store", "")
+st.session_state.setdefault("bl_text_widget", "")
 st.session_state.setdefault("last_msg", "")
+
+# Callback: widget -> store (quand l'utilisateur édite la zone de texte)
+def _on_bl_text_change():
+    st.session_state["bl_store"] = st.session_state.get("bl_text_widget", "")
 
 col1, col2 = st.columns([2,1], gap="large")
 
@@ -117,18 +122,30 @@ with col1:
 
 with col2:
     st.markdown("### Blacklist")
+
+    # Import .txt -> met à jour la source de vérité PUIS pousse dans le widget
     bl_file = st.file_uploader("Importer une blacklist (.txt)", type=["txt"], accept_multiple_files=False, key="bl_file")
     if bl_file is not None:
         try:
             txt = bl_file.read().decode("utf-8", errors="replace")
             lines = [l.strip() for l in txt.splitlines() if l.strip()]
-            st.session_state["bl_store"] = "\n".join(lines)
+            new_store = "\n".join(lines)
+            # MAJ cohérente : on met à jour store + widget, sans réécrire une clé de widget déjà rendue
+            st.session_state["bl_store"] = new_store
+            st.session_state["bl_text_widget"] = new_store
             st.session_state["last_msg"] = f"Blacklist importée : {len(lines)} ligne(s)."
             st.rerun()
         except Exception as e:
             st.error(f"Erreur import blacklist : {e}")
 
-    st.text_area("Contenu de la blacklist (1 par ligne)", height=220, key="bl_store")
+    # Widget lié à bl_text_widget (et pas à bl_store)
+    st.text_area(
+        "Contenu de la blacklist (1 par ligne)",
+        value=st.session_state.get("bl_text_widget", st.session_state.get("bl_store", "")),
+        height=220,
+        key="bl_text_widget",
+        on_change=_on_bl_text_change
+    )
 
 # Agrégation
 agg = {}
@@ -155,7 +172,6 @@ if uploads:
 if agg:
     st.subheader("Aperçu des annotations — sélection multiple")
 
-    # Tableau éditable (ASCII 'select')
     rows = [{"select": False, **v} for v in sorted(agg.values(), key=lambda x: (-x["Occurrences"], x["Annotation"]))]
     df = pd.DataFrame(rows)
 
@@ -173,15 +189,9 @@ if agg:
         }
     )
 
+    # Bouton d'ajout : on met à jour bl_store ET on pousse dans le widget, sans toucher à la clé du widget déjà rendue
     if st.button("Ajouter la sélection à la blacklist", key="btn_add_to_bl"):
-        # -> IMPORTANT: on utilise la valeur RETOURNÉE par data_editor
-        edited_df = edited
-        if not isinstance(edited_df, pd.DataFrame):
-            try:
-                edited_df = pd.DataFrame(edited_df)
-            except Exception:
-                edited_df = None
-
+        edited_df = edited if isinstance(edited, pd.DataFrame) else pd.DataFrame(edited)
         if edited_df is None or "select" not in edited_df.columns or "Annotation" not in edited_df.columns:
             st.warning("Aucune sélection trouvée.")
         else:
@@ -195,8 +205,11 @@ if agg:
                     k = normalize(item)
                     if k and k not in seen:
                         seen.add(k); dedup.append(item)
-                st.session_state["bl_store"] = "\n".join(dedup)
-                st.session_state["last_msg"] = f"{len(selected)} élément(s) ajoutés à la blacklist."
+                new_store = "\n".join(dedup)
+                # MAJ cohérente store + widget
+                st.session_state["bl_store"] = new_store
+                st.session_state["bl_text_widget"] = new_store
+                st.success(f"{len(selected)} élément(s) ajoutés à la blacklist.")
                 st.rerun()
 
 # Export
@@ -249,7 +262,7 @@ if st.button("Appliquer blacklist & Exporter en ZIP", type="primary", key="btn_e
         else:
             st.info("Aucun élément retiré.")
 
-# Message persistant (après import/ajout)
+# Message persistant
 if st.session_state.get("last_msg"):
     st.info(st.session_state["last_msg"])
     st.session_state["last_msg"] = ""
